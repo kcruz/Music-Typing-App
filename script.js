@@ -47,11 +47,23 @@ function initAudio() {
         compressorNode.connect(lowPassFilterNode);
         lowPassFilterNode.connect(masterGainNode);
         masterGainNode.connect(audioContext.destination);
+
+        // Play a silent buffer to fully unlock audio on iOS
+        const silentBuffer = audioContext.createBuffer(1, 1, 22050);
+        const source = audioContext.createBufferSource();
+        source.buffer = silentBuffer;
+        source.connect(audioContext.destination);
+        source.start(0);
     }
     if (audioContext.state === 'suspended') {
         audioContext.resume();
     }
 }
+
+// Unlock audio on the earliest possible user gesture
+['touchstart', 'touchend', 'click'].forEach(evt => {
+    document.addEventListener(evt, initAudio, { once: true });
+});
 
 function getMasterInput() {
     return compressorNode || audioContext.destination;
