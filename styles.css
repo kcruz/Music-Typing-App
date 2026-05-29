@@ -41,6 +41,16 @@ body {
     outline: none;
 }
 
+#hiddenInput {
+    position: absolute;
+    left: -9999px;
+    top: 0;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    font-size: 16px;
+}
+
 #textDisplay::before {
     content: 'Start typing...';
     position: absolute;

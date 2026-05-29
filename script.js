@@ -332,34 +332,71 @@ function addLetter(char, charCode) {
     textDisplay.appendChild(span);
 }
 
-document.addEventListener('keydown', (e) => {
+const hiddenInput = document.getElementById('hiddenInput');
+
+function focusInput() {
+    hiddenInput.focus();
+}
+
+document.querySelector('.paper').addEventListener('click', focusInput);
+document.querySelector('.paper').addEventListener('touchend', (e) => {
+    e.preventDefault();
+    focusInput();
+});
+
+function handleBackspace() {
     initAudio();
+    const x = window.innerWidth / 2 + (Math.random() - 0.5) * 200;
+    const y = window.innerHeight / 2 + (Math.random() - 0.5) * 100;
+    const scale = scales[currentScale];
+    const letters = textDisplay.querySelectorAll('.letter');
+    if (letters.length > 0) {
+        letters[letters.length - 1].remove();
+    }
+    playFixedNote(scale[scale.length - 1], x, y, 1.2, 0.2);
+}
+
+hiddenInput.addEventListener('beforeinput', (e) => {
+    if (e.inputType === 'deleteContentBackward' || e.inputType === 'deleteContentForward') {
+        e.preventDefault();
+        handleBackspace();
+        hiddenInput.value = '​';
+        hiddenInput.setSelectionRange(1, 1);
+    }
+});
+
+hiddenInput.addEventListener('input', (e) => {
+    initAudio();
+    const data = e.data;
+    if (!data) return;
 
     const x = window.innerWidth / 2 + (Math.random() - 0.5) * 200;
     const y = window.innerHeight / 2 + (Math.random() - 0.5) * 100;
     const scale = scales[currentScale];
 
+    for (const char of data) {
+        if (char === ' ') {
+            addLetter(' ', 32);
+            playFixedNote(scale[0], x, y, 1.8, 0.18);
+        } else {
+            const charCode = char.charCodeAt(0);
+            addLetter(char, charCode);
+            playNote(charCode, x, y);
+        }
+    }
+    hiddenInput.value = '​';
+    hiddenInput.setSelectionRange(1, 1);
+});
+
+hiddenInput.addEventListener('keydown', (e) => {
     if (e.key === 'Backspace') {
         e.preventDefault();
-        const letters = textDisplay.querySelectorAll('.letter');
-        if (letters.length > 0) {
-            letters[letters.length - 1].remove();
-        }
-        // Backspace: higher, short tone (top of scale)
-        playFixedNote(scale[scale.length - 1], x, y, 1.2, 0.2);
-    } else if (e.key === ' ') {
-        e.preventDefault();
-        addLetter(' ', 32);
-        // Spacebar: low, soft tone (root of scale)
-        playFixedNote(scale[0], x, y, 1.8, 0.18);
-    } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
-        e.preventDefault();
-        
-        const charCode = e.key.charCodeAt(0);
-        addLetter(e.key, charCode);
-        playNote(charCode, x, y);
+        handleBackspace();
     }
 });
+
+hiddenInput.value = '​';
+focusInput();
 
 clearBtn.addEventListener('click', () => {
     textDisplay.innerHTML = '';
