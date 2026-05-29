@@ -48,6 +48,9 @@ function initAudio() {
         lowPassFilterNode.connect(masterGainNode);
         masterGainNode.connect(audioContext.destination);
     }
+    if (audioContext.state === 'suspended') {
+        audioContext.resume();
+    }
 }
 
 function getMasterInput() {
@@ -338,9 +341,13 @@ function focusInput() {
     hiddenInput.focus();
 }
 
-document.querySelector('.paper').addEventListener('click', focusInput);
+document.querySelector('.paper').addEventListener('click', () => {
+    initAudio();
+    focusInput();
+});
 document.querySelector('.paper').addEventListener('touchend', (e) => {
     e.preventDefault();
+    initAudio();
     focusInput();
 });
 
