@@ -39,51 +39,57 @@ function playUnlockPulse() {
     source.start(0);
 }
 
-// Initialize audio context on first user interaction.
-async function initAudio() {
+function createAudioGraph(AudioContextClass) {
+    audioContext = new AudioContextClass();
+
+    compressorNode = audioContext.createDynamicsCompressor();
+    compressorNode.threshold.value = -24;
+    compressorNode.knee.value = 30;
+    compressorNode.ratio.value = 6;
+    compressorNode.attack.value = 0.003;
+    compressorNode.release.value = 0.15;
+
+    lowPassFilterNode = audioContext.createBiquadFilter();
+    lowPassFilterNode.type = 'lowpass';
+    lowPassFilterNode.frequency.value = calmerToFreq(calmerLevel);
+    lowPassFilterNode.Q.value = 0.7;
+
+    masterGainNode = audioContext.createGain();
+    masterGainNode.gain.value = volumeLevel;
+
+    compressorNode.connect(lowPassFilterNode);
+    lowPassFilterNode.connect(masterGainNode);
+    masterGainNode.connect(audioContext.destination);
+}
+
+// Initialize audio context — fully synchronous so it never breaks the
+// user-gesture chain that iOS Safari requires for audio playback.
+function initAudio() {
     const AudioContextClass = getAudioContextClass();
     if (!AudioContextClass) return false;
 
     if (!audioContext) {
-        audioContext = new AudioContextClass();
-
-        compressorNode = audioContext.createDynamicsCompressor();
-        compressorNode.threshold.value = -24;
-        compressorNode.knee.value = 30;
-        compressorNode.ratio.value = 6;
-        compressorNode.attack.value = 0.003;
-        compressorNode.release.value = 0.15;
-
-        lowPassFilterNode = audioContext.createBiquadFilter();
-        lowPassFilterNode.type = 'lowpass';
-        lowPassFilterNode.frequency.value = calmerToFreq(calmerLevel);
-        lowPassFilterNode.Q.value = 0.7;
-
-        masterGainNode = audioContext.createGain();
-        masterGainNode.gain.value = volumeLevel;
-
-        compressorNode.connect(lowPassFilterNode);
-        lowPassFilterNode.connect(masterGainNode);
-        masterGainNode.connect(audioContext.destination);
-
+        createAudioGraph(AudioContextClass);
+        // Play silent buffer immediately during the gesture to unlock iOS audio
         playUnlockPulse();
     }
 
-    if (audioContext.state === 'suspended') {
-        await audioContext.resume();
+    // resume() returns a promise but we fire-and-forget to stay synchronous
+    if (audioContext.state === 'suspended' && audioContext.resume) {
+        audioContext.resume();
     }
 
-    return audioContext.state === 'running';
+    return true;
 }
 
-function primeAudio() {
-    initAudio().catch(err => console.error('Audio initialization failed:', err));
+function isAudioReady() {
+    return audioContext && audioContext.state === 'running';
 }
 
 // Unlock audio on the earliest possible user gesture. Pointer events cover
 // touch, pen, and mouse; the extra touchstart listener helps older iOS Safari.
 ['pointerdown', 'touchstart', 'keydown'].forEach(evt => {
-    document.addEventListener(evt, primeAudio, { once: true, passive: true });
+    document.addEventListener(evt, initAudio, { once: true, passive: true });
 });
 
 function getMasterInput() {
@@ -111,9 +117,88 @@ function midiToFrequency(midi) {
 
 // Playback: same envelope as live typing
 const NOTE_INTERVAL = 0.35;
+const LETTER_DURATION = 3.02;
 const LETTER_SUSTAIN = 0.22;
 const SPACE_DURATION = 1.8;
 const SPACE_GAIN = 0.18;
+const fallbackToneUrls = new Map();
+
+function writePcmWav(samples, sampleRate) {
+    const bytesPerSample = 2;
+    const dataSize = samples.length * bytesPerSample;
+    const arrayBuffer = new ArrayBuffer(44 + dataSize);
+    const view = new DataView(arrayBuffer);
+    const writeStr = (offset, str) => {
+        for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+    };
+
+    writeStr(0, 'RIFF');
+    view.setUint32(4, 36 + dataSize, true);
+    writeStr(8, 'WAVE');
+    writeStr(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * bytesPerSample, true);
+    view.setUint16(32, bytesPerSample, true);
+    view.setUint16(34, 16, true);
+    writeStr(36, 'data');
+    view.setUint32(40, dataSize, true);
+
+    let offset = 44;
+    for (const sample of samples) {
+        const clamped = Math.max(-1, Math.min(1, sample));
+        const value = clamped < 0 ? clamped * 0x8000 : clamped * 0x7FFF;
+        view.setInt16(offset, value, true);
+        offset += 2;
+    }
+
+    return new Blob([arrayBuffer], { type: 'audio/wav' });
+}
+
+function getFallbackToneUrl(midiNote, duration, gainLevel) {
+    const key = `${midiNote}:${duration}:${gainLevel}`;
+    if (fallbackToneUrls.has(key)) return fallbackToneUrls.get(key);
+
+    const frequency = midiToFrequency(midiNote);
+    const sampleRate = 22050;
+    const sampleCount = Math.max(1, Math.ceil(duration * sampleRate));
+    const samples = new Float32Array(sampleCount);
+    const attackSamples = Math.max(1, Math.floor(0.02 * sampleRate));
+    const releaseSamples = Math.max(1, Math.floor(Math.min(0.6, duration * 0.4) * sampleRate));
+
+    for (let i = 0; i < sampleCount; i++) {
+        const attack = Math.min(1, i / attackSamples);
+        const releaseStart = sampleCount - releaseSamples;
+        const release = i > releaseStart ? Math.max(0, (sampleCount - i) / releaseSamples) : 1;
+        const envelope = Math.min(attack, release);
+        samples[i] = Math.sin((2 * Math.PI * frequency * i) / sampleRate) * gainLevel * envelope;
+    }
+
+    const url = URL.createObjectURL(writePcmWav(samples, sampleRate));
+    fallbackToneUrls.set(key, url);
+    return url;
+}
+
+function playFallbackTone(midiNote, duration, gainLevel) {
+    if (isMuted) return;
+
+    const audio = new Audio(getFallbackToneUrl(midiNote, duration, gainLevel));
+    audio.volume = volumeLevel;
+    audio.play().catch(err => console.error('Fallback audio playback failed:', err));
+}
+
+function playFallbackScore(score) {
+    score.forEach((note, i) => {
+        setTimeout(() => {
+            const duration = note.isSpace ? SPACE_DURATION : LETTER_DURATION;
+            const gainLevel = note.isSpace ? SPACE_GAIN : LETTER_SUSTAIN;
+            playFallbackTone(note.midiNote, duration, gainLevel);
+        }, i * NOTE_INTERVAL * 1000);
+    });
+    runPlaybackBall(getLetterPositions());
+}
 
 function getScoreFromDisplay() {
     const scale = scales[currentScale];
@@ -207,11 +292,11 @@ function runPlaybackBall(letterPositions) {
     playbackBallTimeoutIds.push(hideId);
 }
 
-async function playScore() {
+function playScore() {
     const score = getScoreFromDisplay();
     if (score.length === 0) return;
-    const isAudioReady = await initAudio();
-    if (!isAudioReady || isMuted) return;
+    initAudio();
+    if (!audioContext || isMuted) return;
 
     const now = audioContext.currentTime;
     score.forEach((note, i) => {
@@ -279,7 +364,8 @@ function bufferToWav(buffer) {
 }
 
 function playNote(charCode, x, y) {
-    if (isMuted || !audioContext || audioContext.state !== 'running') return;
+    if (isMuted || !audioContext) return;
+    initAudio();
 
     const scale = scales[currentScale];
     const noteIndex = charCode % scale.length;
@@ -318,7 +404,8 @@ function playNote(charCode, x, y) {
 
 // Play a fixed note (for spacebar & backspace) with optional duration
 function playFixedNote(midiNote, x, y, duration = 2, gainLevel = 0.2) {
-    if (isMuted || !audioContext || audioContext.state !== 'running') return;
+    if (isMuted || !audioContext) return;
+    initAudio();
 
     const frequency = midiToFrequency(midiNote);
     const oscillator = audioContext.createOscillator();
@@ -403,7 +490,7 @@ function focusInput() {
 }
 
 function activatePaper() {
-    primeAudio();
+    initAudio();
     focusInput();
 }
 
@@ -411,7 +498,7 @@ paper.addEventListener('pointerdown', activatePaper);
 paper.addEventListener('click', activatePaper);
 
 function handleBackspace() {
-    primeAudio();
+    initAudio();
     const x = window.innerWidth / 2 + (Math.random() - 0.5) * 200;
     const y = window.innerHeight / 2 + (Math.random() - 0.5) * 100;
     const scale = scales[currentScale];
@@ -432,7 +519,7 @@ hiddenInput.addEventListener('beforeinput', (e) => {
 });
 
 hiddenInput.addEventListener('input', (e) => {
-    primeAudio();
+    initAudio();
     const data = e.data || hiddenInput.value.split(INPUT_SENTINEL).join('');
     if (!data) return;
 
@@ -497,12 +584,12 @@ playBtn.addEventListener('click', () => {
     playScore();
 });
 
-downloadBtn.addEventListener('click', async () => {
+downloadBtn.addEventListener('click', () => {
     const score = getScoreFromDisplay();
     if (score.length === 0) {
         return;
     }
-    await initAudio();
+    initAudio();
     playBtn.disabled = true;
     downloadBtn.disabled = true;
     downloadBtn.textContent = 'Rendering…';
