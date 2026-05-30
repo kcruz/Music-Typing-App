@@ -7,6 +7,7 @@
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+    <div class="promo-strip">JOIN THE MUSIC MAKERS — Compose with every letter</div>
     <main class="app">
         <section class="paper">
             <div id="textDisplay">
@@ -15,7 +16,11 @@
             <textarea id="hiddenInput" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" aria-label="Type here to create music"></textarea>
         </section>
         <aside class="sidebar">
-            <h1 class="logo">Musical Typing</h1>
+            <div class="brand-block">
+                <span class="brand-mark" aria-hidden="true">✦</span>
+                <h1 class="logo">Musical Typing</h1>
+                <p class="tagline">Letters in motion.</p>
+            </div>
             <div class="controls">
                 <button id="clearBtn">Clear</button>
                 <button id="muteBtn">Mute</button>
@@ -44,6 +49,7 @@
             <p class="hint">Tap the paper and type to create music.</p>
         </aside>
     </main>
+    <div class="sunset-band" aria-hidden="true"></div>
 
     <script src="script.js"></script>
 </body>

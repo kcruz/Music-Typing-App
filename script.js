@@ -6,15 +6,20 @@ const playBtn = document.getElementById('playBtn');
 const downloadBtn = document.getElementById('downloadBtn');
 const volumeSlider = document.getElementById('volumeSlider');
 const calmerSlider = document.getElementById('calmerSlider');
+const hiddenInput = document.getElementById('hiddenInput');
+const paper = document.querySelector('.paper');
+const playbackBall = document.getElementById('playbackBall');
 
 let isMuted = false;
-let volumeLevel = 0.7;  // 0–1, applied when context is created
-let calmerLevel = 0;     // 0–1, 0 = bright, 1 = warm/calm (low-pass)
+let volumeLevel = 0.7;
+let calmerLevel = 0;
 let audioContext;
 let currentScale = 'meditation';
 let masterGainNode;
 let compressorNode;
 let lowPassFilterNode;
+let typedText = '';
+const INPUT_SENTINEL = '\u200B';
 
 // Calmer: 0% = 10kHz (full clarity), 100% = 1.2kHz (warm, soft)
 function calmerToFreq(calmer01) {
@@ -23,12 +28,25 @@ function calmerToFreq(calmer01) {
     return minFreq + (1 - calmer01) * (maxFreq - minFreq);
 }
 
-// Initialize audio context on first user interaction
-function initAudio() {
-    if (!audioContext) {
-        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+function getAudioContextClass() {
+    return window.AudioContext || window.webkitAudioContext;
+}
 
-        // Master chain: notes → compressor → low-pass (calmer) → master gain → destination
+function playUnlockPulse() {
+    const source = audioContext.createBufferSource();
+    source.buffer = audioContext.createBuffer(1, 1, audioContext.sampleRate);
+    source.connect(audioContext.destination);
+    source.start(0);
+}
+
+// Initialize audio context on first user interaction.
+async function initAudio() {
+    const AudioContextClass = getAudioContextClass();
+    if (!AudioContextClass) return false;
+
+    if (!audioContext) {
+        audioContext = new AudioContextClass();
+
         compressorNode = audioContext.createDynamicsCompressor();
         compressorNode.threshold.value = -24;
         compressorNode.knee.value = 30;
@@ -48,21 +66,24 @@ function initAudio() {
         lowPassFilterNode.connect(masterGainNode);
         masterGainNode.connect(audioContext.destination);
 
-        // Play a silent buffer to fully unlock audio on iOS
-        const silentBuffer = audioContext.createBuffer(1, 1, 22050);
-        const source = audioContext.createBufferSource();
-        source.buffer = silentBuffer;
-        source.connect(audioContext.destination);
-        source.start(0);
+        playUnlockPulse();
     }
+
     if (audioContext.state === 'suspended') {
-        audioContext.resume();
+        await audioContext.resume();
     }
+
+    return audioContext.state === 'running';
 }
 
-// Unlock audio on the earliest possible user gesture
-['touchstart', 'touchend', 'click'].forEach(evt => {
-    document.addEventListener(evt, initAudio, { once: true });
+function primeAudio() {
+    initAudio().catch(err => console.error('Audio initialization failed:', err));
+}
+
+// Unlock audio on the earliest possible user gesture. Pointer events cover
+// touch, pen, and mouse; the extra touchstart listener helps older iOS Safari.
+['pointerdown', 'touchstart', 'keydown'].forEach(evt => {
+    document.addEventListener(evt, primeAudio, { once: true, passive: true });
 });
 
 function getMasterInput() {
@@ -90,25 +111,20 @@ function midiToFrequency(midi) {
 
 // Playback: same envelope as live typing
 const NOTE_INTERVAL = 0.35;
-const LETTER_DURATION = 0.02 + 2 + 1;  // attack + sustain + release
 const LETTER_SUSTAIN = 0.22;
 const SPACE_DURATION = 1.8;
 const SPACE_GAIN = 0.18;
 
 function getScoreFromDisplay() {
     const scale = scales[currentScale];
-    const items = [];
-    textDisplay.querySelectorAll('.letter').forEach(span => {
-        const char = span.textContent;
+    return Array.from(typedText, char => {
         if (char === ' ') {
-            items.push({ midiNote: scale[0], isSpace: true });
-        } else {
-            const charCode = char.charCodeAt(0);
-            const noteIndex = charCode % scale.length;
-            items.push({ midiNote: scale[noteIndex], isSpace: false });
+            return { midiNote: scale[0], isSpace: true };
         }
+
+        const noteIndex = char.charCodeAt(0) % scale.length;
+        return { midiNote: scale[noteIndex], isSpace: false };
     });
-    return items;
 }
 
 function scheduleNoteAt(ctx, destination, startTime, midiNote, isSpace) {
@@ -151,7 +167,7 @@ function getLetterPositions() {
         const r = span.getBoundingClientRect();
         positions.push({
             left: r.left - containerRect.left + r.width / 2,
-            top: r.top - containerRect.top + r.height / 2
+            top: r.top - containerRect.top - 8
         });
     });
     return positions;
@@ -160,7 +176,7 @@ function getLetterPositions() {
 let playbackBallTimeoutIds = [];
 
 function runPlaybackBall(letterPositions) {
-    const ball = document.getElementById('playbackBall');
+    const ball = playbackBall;
     if (!ball || letterPositions.length === 0) return;
 
     playbackBallTimeoutIds.forEach(id => clearTimeout(id));
@@ -168,7 +184,7 @@ function runPlaybackBall(letterPositions) {
 
     ball.style.left = letterPositions[0].left + 'px';
     ball.style.top = letterPositions[0].top + 'px';
-    ball.style.transform = 'translate(-50%, -50%)';
+    ball.style.transform = 'translate(-50%, -100%)';
     ball.classList.add('playing');
 
     const intervalMs = NOTE_INTERVAL * 1000;
@@ -191,10 +207,12 @@ function runPlaybackBall(letterPositions) {
     playbackBallTimeoutIds.push(hideId);
 }
 
-function playScore() {
+async function playScore() {
     const score = getScoreFromDisplay();
     if (score.length === 0) return;
-    initAudio();
+    const isAudioReady = await initAudio();
+    if (!isAudioReady || isMuted) return;
+
     const now = audioContext.currentTime;
     score.forEach((note, i) => {
         scheduleNoteAt(audioContext, getMasterInput(), now + i * NOTE_INTERVAL, note.midiNote, note.isSpace);
@@ -204,11 +222,14 @@ function playScore() {
 
 function renderScoreToWav(score) {
     if (score.length === 0) return null;
+    const OfflineContextClass = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    if (!OfflineContextClass) return Promise.reject(new Error('Offline audio rendering is not supported in this browser.'));
+
     const totalDuration = score.length * NOTE_INTERVAL + 4;
     const sampleRate = 44100;
     const numChannels = 1;
     const numSamples = Math.ceil(totalDuration * sampleRate);
-    const ctx = new OfflineAudioContext(numChannels, numSamples, sampleRate);
+    const ctx = new OfflineContextClass(numChannels, numSamples, sampleRate);
     const masterGain = ctx.createGain();
     masterGain.gain.value = 0.45;
     masterGain.connect(ctx.destination);
@@ -258,7 +279,7 @@ function bufferToWav(buffer) {
 }
 
 function playNote(charCode, x, y) {
-    if (isMuted || !audioContext) return;
+    if (isMuted || !audioContext || audioContext.state !== 'running') return;
 
     const scale = scales[currentScale];
     const noteIndex = charCode % scale.length;
@@ -297,7 +318,7 @@ function playNote(charCode, x, y) {
 
 // Play a fixed note (for spacebar & backspace) with optional duration
 function playFixedNote(midiNote, x, y, duration = 2, gainLevel = 0.2) {
-    if (isMuted || !audioContext) return;
+    if (isMuted || !audioContext || audioContext.state !== 'running') return;
 
     const frequency = midiToFrequency(midiNote);
     const oscillator = audioContext.createOscillator();
@@ -340,37 +361,63 @@ function createNoteParticle(x, y, charCode) {
     }, 2000);
 }
 
-function addLetter(char, charCode) {
+function createLetter(char) {
     const span = document.createElement('span');
     span.className = char === ' ' ? 'letter space' : 'letter';
     span.textContent = char;
-    textDisplay.appendChild(span);
+    return span;
 }
 
-const hiddenInput = document.getElementById('hiddenInput');
+function renderText() {
+    textDisplay.querySelectorAll('.word, .letter.space').forEach(node => node.remove());
+    Array.from(textDisplay.childNodes).forEach(node => {
+        if (node.nodeType === Node.TEXT_NODE) {
+            node.remove();
+        }
+    });
+    textDisplay.classList.toggle('has-text', typedText.length > 0);
+
+    let currentWord = null;
+    for (const char of typedText) {
+        if (char === ' ') {
+            currentWord = null;
+            textDisplay.appendChild(createLetter(char));
+            continue;
+        }
+
+        if (!currentWord) {
+            currentWord = document.createElement('span');
+            currentWord.className = 'word';
+            textDisplay.appendChild(currentWord);
+        }
+        currentWord.appendChild(createLetter(char));
+    }
+
+    if (playbackBall && playbackBall.parentElement !== textDisplay) {
+        textDisplay.appendChild(playbackBall);
+    }
+}
 
 function focusInput() {
     hiddenInput.focus();
 }
 
-document.querySelector('.paper').addEventListener('click', () => {
-    initAudio();
+function activatePaper() {
+    primeAudio();
     focusInput();
-});
-document.querySelector('.paper').addEventListener('touchend', (e) => {
-    e.preventDefault();
-    initAudio();
-    focusInput();
-});
+}
+
+paper.addEventListener('pointerdown', activatePaper);
+paper.addEventListener('click', activatePaper);
 
 function handleBackspace() {
-    initAudio();
+    primeAudio();
     const x = window.innerWidth / 2 + (Math.random() - 0.5) * 200;
     const y = window.innerHeight / 2 + (Math.random() - 0.5) * 100;
     const scale = scales[currentScale];
-    const letters = textDisplay.querySelectorAll('.letter');
-    if (letters.length > 0) {
-        letters[letters.length - 1].remove();
+    if (typedText.length > 0) {
+        typedText = typedText.slice(0, -1);
+        renderText();
     }
     playFixedNote(scale[scale.length - 1], x, y, 1.2, 0.2);
 }
@@ -379,14 +426,14 @@ hiddenInput.addEventListener('beforeinput', (e) => {
     if (e.inputType === 'deleteContentBackward' || e.inputType === 'deleteContentForward') {
         e.preventDefault();
         handleBackspace();
-        hiddenInput.value = '​';
+        hiddenInput.value = INPUT_SENTINEL;
         hiddenInput.setSelectionRange(1, 1);
     }
 });
 
 hiddenInput.addEventListener('input', (e) => {
-    initAudio();
-    const data = e.data;
+    primeAudio();
+    const data = e.data || hiddenInput.value.split(INPUT_SENTINEL).join('');
     if (!data) return;
 
     const x = window.innerWidth / 2 + (Math.random() - 0.5) * 200;
@@ -395,15 +442,16 @@ hiddenInput.addEventListener('input', (e) => {
 
     for (const char of data) {
         if (char === ' ') {
-            addLetter(' ', 32);
+            typedText += ' ';
             playFixedNote(scale[0], x, y, 1.8, 0.18);
         } else {
             const charCode = char.charCodeAt(0);
-            addLetter(char, charCode);
+            typedText += char;
             playNote(charCode, x, y);
         }
     }
-    hiddenInput.value = '​';
+    renderText();
+    hiddenInput.value = INPUT_SENTINEL;
     hiddenInput.setSelectionRange(1, 1);
 });
 
@@ -414,11 +462,12 @@ hiddenInput.addEventListener('keydown', (e) => {
     }
 });
 
-hiddenInput.value = '​';
+hiddenInput.value = INPUT_SENTINEL;
 focusInput();
 
 clearBtn.addEventListener('click', () => {
-    textDisplay.innerHTML = '';
+    typedText = '';
+    renderText();
 });
 
 muteBtn.addEventListener('click', () => {
@@ -445,20 +494,15 @@ calmerSlider.addEventListener('input', (e) => {
 });
 
 playBtn.addEventListener('click', () => {
-    const score = getScoreFromDisplay();
-    if (score.length === 0) {
-        return;
-    }
-    initAudio();
     playScore();
 });
 
-downloadBtn.addEventListener('click', () => {
+downloadBtn.addEventListener('click', async () => {
     const score = getScoreFromDisplay();
     if (score.length === 0) {
         return;
     }
-    initAudio();
+    await initAudio();
     playBtn.disabled = true;
     downloadBtn.disabled = true;
     downloadBtn.textContent = 'Rendering…';
@@ -476,5 +520,4 @@ downloadBtn.addEventListener('click', () => {
     });
 });
 
-// Initialize audio on first click anywhere
-document.body.addEventListener('click', initAudio, { once: true });
+renderText();
