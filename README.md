@@ -47,6 +47,8 @@ Works best in modern browsers that support:
 
 Inspired by [Typatone](https://typatone.com/)
 
+Built with assistance from Claude and Codex.
+
 ## License
 
 Free to use and modify for personal and educational purposes.
