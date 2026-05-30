@@ -62,6 +62,20 @@ function createAudioGraph(AudioContextClass) {
     masterGainNode.connect(audioContext.destination);
 }
 
+// On iOS, Web Audio plays through the "ringer" channel by default, which is
+// silenced by the physical mute switch. Setting the audio session to
+// "playback" routes it through the media channel so it ignores the mute
+// switch (iOS 16.4+). Harmless / ignored on browsers without this API.
+function configureAudioSession() {
+    try {
+        if (navigator.audioSession) {
+            navigator.audioSession.type = 'playback';
+        }
+    } catch (err) {
+        console.error('Audio session configuration failed:', err);
+    }
+}
+
 // Initialize audio context — fully synchronous so it never breaks the
 // user-gesture chain that iOS Safari requires for audio playback.
 function initAudio() {
@@ -69,6 +83,7 @@ function initAudio() {
     if (!AudioContextClass) return false;
 
     if (!audioContext) {
+        configureAudioSession();
         createAudioGraph(AudioContextClass);
         // Play silent buffer immediately during the gesture to unlock iOS audio
         playUnlockPulse();
